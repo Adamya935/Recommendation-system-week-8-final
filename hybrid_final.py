@@ -93,7 +93,7 @@ def crew_extract(col):
 # -----------------------------------------------------------------------------
 def build_content_based():
     movies = pd.read_csv('movies_metadata.csv', low_memory=False)
-    credits = pd.read_csv('credits.csv')
+    credits = pd.read_csv('credits_small.csv')
     keywords = pd.read_csv('keywords.csv')
 
     movies = movies[movies['id'].apply(lambda x: str(x).isdigit())].copy()

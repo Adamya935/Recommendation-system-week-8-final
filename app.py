@@ -1,148 +1,194 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-STREAMLIT FRONTEND WEB APP (app.py)
-Location: C:\Users\acer\OneDrive\Desktop\Recommendation-System\app.py
+STREAMLIT FRONTEND FOR THE HYBRID MOVIE RECOMMENDATION SYSTEM
 ================================================================================
-Connected directly to hybrid_final.py.
-Ultra-simple 2-Input UI (Movie Title & User ID) with HD Movie Poster card grid.
+Setup:
+    1. Place this file in the SAME folder as hybrid_final.py
+       (the file with build_content_based, build_collaborative,
+       hybrid_recommend, etc.) and the 5 dataset CSVs:
+       movies_metadata.csv, credits_small.csv, keywords.csv,
+       ratings_small.csv, links_small.csv
+    2. pip install streamlit
+    3. streamlit run app.py
+
+What it does:
+    - Builds the content, collaborative, and popularity engines once and
+      caches them in memory with st.cache_resource, so the heavy
+      TF-IDF/KNN build only runs on first load, not on every interaction.
+    - Takes a movie title and/or a user id as input, same as the terminal
+      version's `run_interactive` loop, but as a web form.
+    - Shows the final hybrid recommendations, plus optional side-by-side
+      content-only and collaborative-only breakdowns so you can see how
+      the two engines diverge and how alpha blends them.
+
+NOTE: hybrid_final.py only exposes build_content_based(), build_popularity_table(),
+and build_collaborative(data) — there is no on-disk caching layer (no
+get_or_build_* wrappers, no clear_cache) in that file, so all caching here is
+done purely with Streamlit's own st.cache_resource, in-memory, per server process.
 ================================================================================
 """
 
-import os
-import pandas as pd
 import streamlit as st
+import pandas as pd
+
 from hybrid_final import (
     build_content_based,
+    build_popularity_table,
     build_collaborative,
+    recommend_content,
+    recommend_user_based,
     hybrid_recommend,
-    calculate_graduated_alpha
+    calculate_graduated_alpha,
 )
 
-# -----------------------------------------------------------------------------
-# 1. PAGE CONFIG & DARK THEME STYLING
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Hybrid Movie Recommender",
-    page_icon="🎬",
-    layout="wide"
-)
+st.set_page_config(page_title="Hybrid Movie Recommender", page_icon="🎬", layout="wide")
 
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #0b0e14;
-        color: #f8fafc;
-    }
-    .movie-card-box {
-        background: rgba(21, 26, 38, 0.85);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 12px;
-        padding: 1rem;
-        margin-bottom: 1.2rem;
-        text-align: center;
-    }
-    .movie-card-box:hover {
-        border-color: rgba(0, 242, 254, 0.4);
-        box-shadow: 0 0 15px rgba(0, 242, 254, 0.15);
-    }
-    .badge-score {
-        background: linear-gradient(135deg, #00f2fe, #7928ca);
-        color: #ffffff;
-        font-weight: 700;
-        padding: 0.2rem 0.6rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-    }
-    .status-banner {
-        background: rgba(0, 242, 254, 0.1);
-        color: #00f2fe;
-        border: 1px solid rgba(0, 242, 254, 0.25);
-        padding: 0.6rem 1rem;
-        border-radius: 8px;
-        font-size: 0.9rem;
-        margin-bottom: 1.5rem;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. CACHED BACKEND INITIALIZATION
+# In-memory caching only. Each of these runs once per server process (first
+# time any user hits the app) and is then reused for every subsequent
+# interaction/session, since hybrid_final.py has no disk-cache layer of its
+# own to fall back on.
 # -----------------------------------------------------------------------------
-@st.cache_resource
-def init_backend():
-    data, vectors, mid_to_pos, pos_to_mid = build_content_based()
-    user_rating_matrix, movie_columns, user_index, movie_id_to_title, nbrs, user_rating_counts, user_means, user_stds = build_collaborative(data)
-    
-    base_poster = "https://image.tmdb.org/t/p/w500"
-    if 'poster_path' in data.columns:
-        data['poster_url'] = data['poster_path'].apply(
-            lambda p: f"{base_poster}{p}" if pd.notna(p) and str(p).startswith('/') else "https://via.placeholder.com/500x750?text=No+Poster"
-        )
-    else:
-        data['poster_url'] = "https://via.placeholder.com/500x750?text=Movie+Poster"
+@st.cache_resource(show_spinner="Building content-based feature space (TF-IDF)...")
+def load_content():
+    return build_content_based()
 
-    poster_map = data.set_index('title')['poster_url'].to_dict()
-    return data, vectors, mid_to_pos, pos_to_mid, user_rating_matrix, movie_columns, user_index, movie_id_to_title, nbrs, user_rating_counts, user_means, user_stds, poster_map
 
-(data, vectors, mid_to_pos, pos_to_mid, user_rating_matrix, movie_columns,
- user_index, movie_id_to_title, nbrs, user_rating_counts, user_means, user_stds, poster_map) = init_backend()
+@st.cache_resource(show_spinner="Building popularity fallback table...")
+def load_popularity():
+    return build_popularity_table()
+
+
+@st.cache_resource(show_spinner="Building collaborative matrix & fitting KNN...")
+def load_collaborative(_data):
+    return build_collaborative(_data)
+
+
+data, vectors, all_titles, title_to_pos, pos_to_id, id_to_title = load_content()
+popularity_table = load_popularity()
+(user_rating_matrix, movie_columns, user_index, movieid_to_tmdbid,
+ nbrs, user_rating_counts, user_means, user_stds) = load_collaborative(data)
+
 
 # -----------------------------------------------------------------------------
-# 3. ULTRA-SIMPLE UI: ONLY 2 INPUT FIELDS
+# Sidebar — inputs
 # -----------------------------------------------------------------------------
-st.title("🎬 Hybrid Movie Recommendation System")
-st.write("Enter a movie title and optional User ID for real-time hybrid recommendations.")
+st.sidebar.header("Inputs")
+movie_title = st.sidebar.text_input("Movie title", placeholder="e.g. toy story")
+raw_user_id = st.sidebar.text_input("User ID (optional)", placeholder="e.g. 1")
+top_n = st.sidebar.slider("Number of recommendations", min_value=3, max_value=15, value=5)
+show_breakdown = st.sidebar.checkbox("Show content-only / collaborative-only breakdown", value=True)
+run_button = st.sidebar.button("Get Recommendations", type="primary")
 
-col_input1, col_input2 = st.columns(2)
-
-with col_input1:
-    movie_input = st.text_input("1. Enter Movie Title:", value="The Godfather")
-
-with col_input2:
-    user_input = st.text_input("2. Enter User ID (Optional / Leave blank for Cold-Start):", value="1")
-
-user_id = int(user_input.strip()) if user_input.strip().isdigit() else None
-
-if movie_input.strip() or user_id is not None:
-    num_r = user_rating_counts.get(user_id, 0) if user_id in user_index else 0
-    alpha = calculate_graduated_alpha(num_r)
-    is_cold = (user_id is None) or (user_id not in user_index)
-
-    status_txt = f"❄️ **Cold-Start Active**: User '{user_input}' (0 ratings). Alpha (α) = 0.00 (100% Content Match seeded from '{movie_input}')" if is_cold else f"🔥 **Warm Profile Active**: User ID '{user_id}' ({num_r} ratings in DB). Graduated Alpha (α) = {alpha:.2f} (Blending Collab + Content)"
-    st.markdown(f"<div class='status-banner'>{status_txt}</div>", unsafe_allow_html=True)
-
-    recs = hybrid_recommend(
-        movie_title=movie_input if movie_input.strip() else None,
-        user_id=user_id,
-        data=data,
-        vectors=vectors,
-        mid_to_pos=mid_to_pos,
-        pos_to_mid=pos_to_mid,
-        user_rating_matrix=user_rating_matrix,
-        movie_columns=movie_columns,
-        user_index=user_index,
-        movie_id_to_title=movie_id_to_title,
-        nbrs=nbrs,
-        user_rating_counts=user_rating_counts,
-        user_means=user_means,
-        user_stds=user_stds,
-        top_n=6
+with st.sidebar.expander("Advanced"):
+    st.caption(
+        "The engines are built once and cached in memory for this server process. "
+        "If you've updated the CSVs, use the button below to force a rebuild."
     )
+    if st.button("Clear cache & rebuild"):
+        st.cache_resource.clear()
+        st.success("Cache cleared. The page will rebuild the engines on the next run.")
+        st.rerun()
 
-    st.subheader("🎯 Recommended Movies")
+user_id = int(raw_user_id) if raw_user_id.strip().isdigit() else None
 
-    cols_per_row = 3
-    for i in range(0, len(recs), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for j in range(cols_per_row):
-            if i + j < len(recs):
-                title, est_stars = recs[i + j]
-                poster_url = poster_map.get(str(title), "https://via.placeholder.com/500x750?text=Movie+Poster")
+st.title("🎬 Hybrid Movie Recommendation System")
+st.caption("Content-based + collaborative filtering, blended with a graduated cold-start alpha.")
 
-                with cols[j]:
-                    st.markdown("<div class='movie-card-box'>", unsafe_allow_html=True)
-                    st.image(poster_url, use_container_width=True)
-                    st.markdown(f"### {str(title).title()}")
-                    st.markdown(f"<span class='badge-score'>★ {est_stars} / 5.0</span>", unsafe_allow_html=True)
-                    st.markdown("</div>", unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# Status panel — mirrors the [INFO] lines from the terminal version
+# -----------------------------------------------------------------------------
+def show_status(movie_title, user_id):
+    is_known_user = user_id is not None and user_id in user_index
+    num_ratings = user_rating_counts.get(user_id, 0) if is_known_user else 0
+    alpha = calculate_graduated_alpha(num_ratings)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("User status", "Known" if is_known_user else ("Not provided" if user_id is None else "Unknown / new"))
+    col2.metric("Ratings on record", num_ratings)
+    col3.metric("Alpha (collaborative weight)", f"{alpha:.2f}")
+
+    if movie_title is None and not is_known_user:
+        st.info("No usable movie title or known user — results will fall back to overall popularity.")
+    elif not is_known_user:
+        st.info(f"User unknown/new — alpha = 0.00, results are pure content-based, seeded from '{movie_title}'.")
+    else:
+        st.info(f"User has {num_ratings} ratings on record — alpha = {alpha:.2f} (graduated confidence).")
+
+    return is_known_user, alpha
+
+
+def results_to_df(results, score_label="Estimated ★"):
+    return pd.DataFrame(results, columns=["Title", score_label])
+
+
+# -----------------------------------------------------------------------------
+# Main panel
+# -----------------------------------------------------------------------------
+if run_button:
+    if not movie_title.strip() and user_id is None:
+        st.warning("Enter a movie title, a user id, or both.")
+    else:
+        is_known_user, alpha = show_status(movie_title if movie_title.strip() else None, user_id)
+
+        st.subheader("Hybrid Recommendations")
+        hybrid_results = hybrid_recommend(
+            movie_title=movie_title if movie_title.strip() else None,
+            user_id=user_id,
+            top_n=top_n,
+            vectors=vectors, all_titles=all_titles, title_to_pos=title_to_pos,
+            pos_to_id=pos_to_id, id_to_title=id_to_title,
+            user_rating_matrix=user_rating_matrix, movie_columns=movie_columns,
+            user_index=user_index, movieid_to_tmdbid=movieid_to_tmdbid, nbrs=nbrs,
+            user_rating_counts=user_rating_counts, user_means=user_means,
+            user_stds=user_stds, popularity_table=popularity_table,
+        )
+
+        if hybrid_results:
+            st.dataframe(results_to_df(hybrid_results), use_container_width=True, hide_index=True)
+        else:
+            st.warning("No recommendations found for this input.")
+
+        if show_breakdown:
+            st.divider()
+            bcol1, bcol2 = st.columns(2)
+
+            with bcol1:
+                st.subheader("Content-only")
+                if movie_title.strip():
+                    seed_id, content_recs = recommend_content(
+                        movie_title, vectors, all_titles, title_to_pos, pos_to_id, top_n=top_n
+                    )
+                    if content_recs:
+                        content_df = pd.DataFrame(
+                            [(id_to_title.get(mid, f"id {mid}"), round(3.5 + s * 1.4, 1)) for mid, s in content_recs],
+                            columns=["Title", "Estimated ★"],
+                        )
+                        st.dataframe(content_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No content match found for this title.")
+                else:
+                    st.caption("Enter a movie title to see content-based results.")
+
+            with bcol2:
+                st.subheader("Collaborative-only")
+                if is_known_user:
+                    collab_recs = recommend_user_based(
+                        user_id, user_rating_matrix, movie_columns, user_index,
+                        movieid_to_tmdbid, nbrs, top_n=top_n
+                    )
+                    if collab_recs:
+                        collab_df = pd.DataFrame(
+                            [(id_to_title.get(mid, f"id {mid}"), round(s, 1)) for mid, s in collab_recs],
+                            columns=["Title", "Predicted rating"],
+                        )
+                        st.dataframe(collab_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No confident collaborative predictions for this user.")
+                else:
+                    st.caption("Enter a known user id to see collaborative results.")
+else:
+    st.info("Enter a movie title and/or a user id in the sidebar, then click **Get Recommendations**.")

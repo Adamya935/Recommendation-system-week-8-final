@@ -1,2 +1,5 @@
 ratings.csv
 credits.csv
+
+__pycache__/
+*.pyc

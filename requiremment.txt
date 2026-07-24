@@ -6,3 +6,4 @@ scipy
 nltk
 matplotlib
 seaborn
+nltk

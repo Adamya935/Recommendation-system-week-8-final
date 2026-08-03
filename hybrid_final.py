@@ -93,7 +93,7 @@ def crew_extract(col):
 # -----------------------------------------------------------------------------
 def build_content_based():
     movies = pd.read_csv('movies_metadata.csv', low_memory=False)
-    credits = pd.read_csv('credits_small.csv')
+    credits = pd.read_csv('credits.csv')
     keywords = pd.read_csv('keywords.csv')
 
     movies = movies[movies['id'].apply(lambda x: str(x).isdigit())].copy()
@@ -233,9 +233,21 @@ def build_collaborative(data):
 
 
 def recommend_user_based(target_user, user_rating_matrix, movie_columns, user_index,
-                          movieid_to_tmdbid, nbrs, top_n=10, k=10):
+                          movieid_to_tmdbid, nbrs, user_means=None, top_n=10, k=10,
+                          shrinkage_k=2.0):
     """Returns [(tmdb_id, predicted_rating), ...]. Empty list if user is unknown
-    or no confident predictions can be made — no exceptions, clean status only."""
+    or no confident predictions can be made — no exceptions, clean status only.
+
+    A raw prediction backed by only 1-2 neighbors is statistically weak, but
+    a similarity-weighted average collapses to exactly that neighbor's rating
+    when they're the only one who rated the movie — so a single 5-star vote
+    was hitting the ceiling and outranking predictions built from many
+    neighbors. Fix: shrink low-support predictions toward the target user's
+    own mean rating, in proportion to how many neighbors actually voted
+    (support_count). shrinkage_k controls how aggressively: with the default
+    of 2.0, a 1-neighbor prediction is pulled about 2/3 of the way back to
+    the user's mean, while a 10-neighbor prediction is barely shrunk at all.
+    """
     if target_user not in user_index:
         return []
 
@@ -256,9 +268,21 @@ def recommend_user_based(target_user, user_rating_matrix, movie_columns, user_in
     weighted_sum = sims @ top_k_ratings
     rated_mask = (top_k_ratings > 0).astype(float)
     weight_totals = sims @ rated_mask
+    support_count = rated_mask.sum(axis=0)  # how many neighbors actually rated each movie
 
     with np.errstate(divide='ignore', invalid='ignore'):
-        predicted = np.where(weight_totals > 0, weighted_sum / weight_totals, 0.0)
+        raw_predicted = np.where(weight_totals > 0, weighted_sum / weight_totals, 0.0)
+
+    user_fallback = user_means.get(target_user, 3.5) if user_means else 3.5
+    if user_fallback is None or pd.isna(user_fallback):
+        user_fallback = 3.5
+
+    shrinkage = support_count / (support_count + shrinkage_k)
+    predicted = np.where(
+        weight_totals > 0,
+        shrinkage * raw_predicted + (1.0 - shrinkage) * user_fallback,
+        0.0,
+    )
 
     target_ratings = user_rating_matrix[idx]
     candidate_mask = (target_ratings == 0) & (weight_totals > 0)
@@ -327,9 +351,33 @@ def hybrid_recommend(movie_title, user_id, top_n,
 
     collab_recs = (
         recommend_user_based(user_id, user_rating_matrix, movie_columns, user_index,
-                              movieid_to_tmdbid, nbrs, top_n=top_n * 3)
+                              movieid_to_tmdbid, nbrs, user_means=user_means, top_n=top_n * 3)
         if is_known_user else []
     )
+
+    # --- Pure CF pass-through -----------------------------------------------
+    # No movie was given (or the title wasn't found), so the content engine
+    # contributed nothing — content_recs is empty. In that case hybrid mode
+    # should just BE collaborative filtering: surface CF's own predicted
+    # rating directly instead of re-deriving a fresh calibrated star through
+    # the alpha-blend formula below (which used to run even with alpha's
+    # only input being CF, producing a different-looking number for the
+    # exact same ranking). is_known_user is guaranteed True here — the
+    # fully-cold case (no movie AND no known user) already returned via
+    # Regime A above.
+    if not content_recs:
+        if not collab_recs:
+            print("[INFO] No CF candidates for this user — falling back to popularity.")
+            top_pop = popularity_table.head(top_n)
+            return [
+                (id_to_title.get(mid, f"id {mid}"), round(float(wr), 1))
+                for mid, wr in zip(top_pop['id'], top_pop['weighted_rating'])
+            ]
+        ranked = sorted(collab_recs, key=lambda x: x[1], reverse=True)[:top_n]
+        return [
+            (id_to_title.get(mid, f"id {mid}"), round(float(max(1.0, min(5.0, rating))), 1))
+            for mid, rating in ranked
+        ]
 
     c_dict = dict(content_recs)
     raw_collab = dict(collab_recs)

@@ -3,29 +3,19 @@
 ================================================================================
 STREAMLIT FRONTEND FOR THE HYBRID MOVIE RECOMMENDATION SYSTEM
 ================================================================================
-Setup:
-    1. Place this file in the SAME folder as hybrid_final.py
-       (the file with build_content_based, build_collaborative,
-       hybrid_recommend, etc.) and the 5 dataset CSVs:
-       movies_metadata.csv, credits_small.csv, keywords.csv,
-       ratings_small.csv, links_small.csv
-    2. pip install streamlit
-    3. streamlit run app.py
 
-What it does:
-    - Builds the content, collaborative, and popularity engines once and
-      caches them in memory with st.cache_resource, so the heavy
-      TF-IDF/KNN build only runs on first load, not on every interaction.
-    - Takes a movie title and/or a user id as input, same as the terminal
-      version's `run_interactive` loop, but as a web form.
-    - Shows the final hybrid recommendations, plus optional side-by-side
-      content-only and collaborative-only breakdowns so you can see how
-      the two engines diverge and how alpha blends them.
+Place this file in the SAME folder as:
 
-NOTE: hybrid_final.py only exposes build_content_based(), build_popularity_table(),
-and build_collaborative(data) — there is no on-disk caching layer (no
-get_or_build_* wrappers, no clear_cache) in that file, so all caching here is
-done purely with Streamlit's own st.cache_resource, in-memory, per server process.
+    hybrid_final.py
+    movies_metadata.csv
+    credits_small.csv
+    keywords.csv
+    ratings_small.csv
+    links_small.csv
+
+Run:
+
+    streamlit run app.py
 ================================================================================
 """
 
@@ -42,14 +32,17 @@ from hybrid_final import (
     calculate_graduated_alpha,
 )
 
-st.set_page_config(page_title="Hybrid Movie Recommender", page_icon="🎬", layout="wide")
-
+# -----------------------------------------------------------------------------
+# Page configuration
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Hybrid Movie Recommender",
+    page_icon="🎬",
+    layout="wide",
+)
 
 # -----------------------------------------------------------------------------
-# In-memory caching only. Each of these runs once per server process (first
-# time any user hits the app) and is then reused for every subsequent
-# interaction/session, since hybrid_final.py has no disk-cache layer of its
-# own to fall back on.
+# Cached model loading
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Building content-based feature space (TF-IDF)...")
 def load_content():
@@ -61,134 +54,330 @@ def load_popularity():
     return build_popularity_table()
 
 
-@st.cache_resource(show_spinner="Building collaborative matrix & fitting KNN...")
-def load_collaborative(_data):
-    return build_collaborative(_data)
-
-
+# Load content first because collaborative builder needs the processed data
 data, vectors, all_titles, title_to_pos, pos_to_id, id_to_title = load_content()
+
+
+@st.cache_resource(show_spinner="Building collaborative matrix & fitting KNN...")
+def load_collaborative():
+    return build_collaborative(data)
+
+
 popularity_table = load_popularity()
-(user_rating_matrix, movie_columns, user_index, movieid_to_tmdbid,
- nbrs, user_rating_counts, user_means, user_stds) = load_collaborative(data)
 
+(
+    user_rating_matrix,
+    movie_columns,
+    user_index,
+    movieid_to_tmdbid,
+    nbrs,
+    user_rating_counts,
+    user_means,
+    user_stds,
+) = load_collaborative()
 
 # -----------------------------------------------------------------------------
-# Sidebar — inputs
+# Sidebar
 # -----------------------------------------------------------------------------
-st.sidebar.header("Inputs")
-movie_title = st.sidebar.text_input("Movie title", placeholder="e.g. toy story")
-raw_user_id = st.sidebar.text_input("User ID (optional)", placeholder="e.g. 1")
-top_n = st.sidebar.slider("Number of recommendations", min_value=3, max_value=15, value=5)
-show_breakdown = st.sidebar.checkbox("Show content-only / collaborative-only breakdown", value=True)
-run_button = st.sidebar.button("Get Recommendations", type="primary")
+st.sidebar.header("Recommendation Inputs")
+
+movie_title = st.sidebar.text_input(
+    "Movie Title",
+    placeholder="e.g. Toy Story",
+)
+
+raw_user_id = st.sidebar.text_input(
+    "User ID (optional)",
+    placeholder="e.g. 1",
+)
+
+top_n = st.sidebar.slider(
+    "Number of Recommendations",
+    min_value=3,
+    max_value=15,
+    value=5,
+)
+
+show_breakdown = st.sidebar.checkbox(
+    "Show Content vs Collaborative Breakdown",
+    value=True,
+)
+
+run_button = st.sidebar.button(
+    "Get Recommendations",
+    type="primary",
+)
 
 with st.sidebar.expander("Advanced"):
     st.caption(
-        "The engines are built once and cached in memory for this server process. "
-        "If you've updated the CSVs, use the button below to force a rebuild."
+        "If you update the dataset CSV files, clear the cache to rebuild "
+        "the recommendation engines."
     )
-    if st.button("Clear cache & rebuild"):
+
+    if st.button("Clear Cache & Rebuild"):
         st.cache_resource.clear()
-        st.success("Cache cleared. The page will rebuild the engines on the next run.")
+        st.success("Cache cleared successfully.")
         st.rerun()
 
+# Parse user ID safely
 user_id = int(raw_user_id) if raw_user_id.strip().isdigit() else None
 
+# -----------------------------------------------------------------------------
+# Main title
+# -----------------------------------------------------------------------------
 st.title("🎬 Hybrid Movie Recommendation System")
-st.caption("Content-based + collaborative filtering, blended with a graduated cold-start alpha.")
-
+st.caption(
+    "A hybrid recommender that combines content-based filtering and "
+    "collaborative filtering using a graduated cold-start blending strategy."
+)
 
 # -----------------------------------------------------------------------------
-# Status panel — mirrors the [INFO] lines from the terminal version
+# Helper functions
 # -----------------------------------------------------------------------------
-def show_status(movie_title, user_id):
-    is_known_user = user_id is not None and user_id in user_index
-    num_ratings = user_rating_counts.get(user_id, 0) if is_known_user else 0
-    alpha = calculate_graduated_alpha(num_ratings)
+def show_status(movie_title_input, user_id_input):
+    """Display user/movie status information."""
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("User status", "Known" if is_known_user else ("Not provided" if user_id is None else "Unknown / new"))
-    col2.metric("Ratings on record", num_ratings)
-    col3.metric("Alpha (collaborative weight)", f"{alpha:.2f}")
+    is_known_user = (
+        user_id_input is not None and user_id_input in user_index
+    )
 
-    if movie_title is None and not is_known_user:
-        st.info("No usable movie title or known user — results will fall back to overall popularity.")
+    rating_count = (
+        user_rating_counts.get(user_id_input, 0)
+        if is_known_user
+        else 0
+    )
+
+    alpha = calculate_graduated_alpha(rating_count)
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "User Status",
+        (
+            "Known"
+            if is_known_user
+            else (
+                "Not Provided"
+                if user_id_input is None
+                else "Unknown / New"
+            )
+        ),
+    )
+
+    c2.metric(
+        "Ratings on Record",
+        rating_count,
+    )
+
+    c3.metric(
+        "Collaborative Weight (α)",
+        f"{alpha:.2f}",
+    )
+
+    if movie_title_input is None and not is_known_user:
+        st.info(
+            "No valid movie title or known user ID was provided. "
+            "The system will use the popularity-based fallback recommender."
+        )
+
     elif not is_known_user:
-        st.info(f"User unknown/new — alpha = 0.00, results are pure content-based, seeded from '{movie_title}'.")
+        st.info(
+            f"Unknown/new user. α = 0.00, so recommendations are generated "
+            f"purely from content similarity using '{movie_title_input}'."
+        )
+
     else:
-        st.info(f"User has {num_ratings} ratings on record — alpha = {alpha:.2f} (graduated confidence).")
+        st.info(
+            f"User has {rating_count} ratings on record. "
+            f"α = {alpha:.2f}, blending content and collaborative filtering."
+        )
 
     return is_known_user, alpha
 
 
 def results_to_df(results, score_label="Estimated ★"):
-    return pd.DataFrame(results, columns=["Title", score_label])
-
+    return pd.DataFrame(
+        results,
+        columns=["Movie Title", score_label],
+    )
 
 # -----------------------------------------------------------------------------
-# Main panel
+# Recommendation execution
 # -----------------------------------------------------------------------------
 if run_button:
+
     if not movie_title.strip() and user_id is None:
-        st.warning("Enter a movie title, a user id, or both.")
+        st.warning(
+            "Please enter a movie title, a user ID, or both."
+        )
+
     else:
-        is_known_user, alpha = show_status(movie_title if movie_title.strip() else None, user_id)
+
+        is_known_user, alpha = show_status(
+            movie_title if movie_title.strip() else None,
+            user_id,
+        )
 
         st.subheader("Hybrid Recommendations")
-        hybrid_results = hybrid_recommend(
+
+        recommendations = hybrid_recommend(
             movie_title=movie_title if movie_title.strip() else None,
             user_id=user_id,
             top_n=top_n,
-            vectors=vectors, all_titles=all_titles, title_to_pos=title_to_pos,
-            pos_to_id=pos_to_id, id_to_title=id_to_title,
-            user_rating_matrix=user_rating_matrix, movie_columns=movie_columns,
-            user_index=user_index, movieid_to_tmdbid=movieid_to_tmdbid, nbrs=nbrs,
-            user_rating_counts=user_rating_counts, user_means=user_means,
-            user_stds=user_stds, popularity_table=popularity_table,
+            vectors=vectors,
+            all_titles=all_titles,
+            title_to_pos=title_to_pos,
+            pos_to_id=pos_to_id,
+            id_to_title=id_to_title,
+            user_rating_matrix=user_rating_matrix,
+            movie_columns=movie_columns,
+            user_index=user_index,
+            movieid_to_tmdbid=movieid_to_tmdbid,
+            nbrs=nbrs,
+            user_rating_counts=user_rating_counts,
+            user_means=user_means,
+            user_stds=user_stds,
+            popularity_table=popularity_table,
         )
 
-        if hybrid_results:
-            st.dataframe(results_to_df(hybrid_results), use_container_width=True, hide_index=True)
+        if recommendations:
+            st.dataframe(
+                results_to_df(recommendations),
+                use_container_width=True,
+                hide_index=True,
+            )
         else:
-            st.warning("No recommendations found for this input.")
+            st.warning("No recommendations could be generated.")
 
+        # ---------------------------------------------------------------------
+        # Breakdown
+        # ---------------------------------------------------------------------
         if show_breakdown:
+
             st.divider()
-            bcol1, bcol2 = st.columns(2)
 
-            with bcol1:
-                st.subheader("Content-only")
+            left, right = st.columns(2)
+
+            # -------------------------------------------------------------
+            # Content-only
+            # -------------------------------------------------------------
+            with left:
+
+                st.subheader("Content-Based Recommendations")
+
                 if movie_title.strip():
-                    seed_id, content_recs = recommend_content(
-                        movie_title, vectors, all_titles, title_to_pos, pos_to_id, top_n=top_n
-                    )
-                    if content_recs:
-                        content_df = pd.DataFrame(
-                            [(id_to_title.get(mid, f"id {mid}"), round(3.5 + s * 1.4, 1)) for mid, s in content_recs],
-                            columns=["Title", "Estimated ★"],
-                        )
-                        st.dataframe(content_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.caption("No content match found for this title.")
-                else:
-                    st.caption("Enter a movie title to see content-based results.")
 
-            with bcol2:
-                st.subheader("Collaborative-only")
-                if is_known_user:
-                    collab_recs = recommend_user_based(
-                        user_id, user_rating_matrix, movie_columns, user_index,
-                        movieid_to_tmdbid, nbrs, top_n=top_n
+                    _, content_results = recommend_content(
+                        movie_title,
+                        vectors,
+                        all_titles,
+                        title_to_pos,
+                        pos_to_id,
+                        top_n=top_n,
                     )
-                    if collab_recs:
-                        collab_df = pd.DataFrame(
-                            [(id_to_title.get(mid, f"id {mid}"), round(s, 1)) for mid, s in collab_recs],
-                            columns=["Title", "Predicted rating"],
+
+                    if content_results:
+
+                        content_df = pd.DataFrame(
+                            [
+                                (
+                                    id_to_title.get(mid, f"id {mid}"),
+                                    round(3.5 + score * 1.4, 1),
+                                )
+                                for mid, score in content_results
+                            ],
+                            columns=["Movie Title", "Estimated ★"],
                         )
-                        st.dataframe(collab_df, use_container_width=True, hide_index=True)
+
+                        st.dataframe(
+                            content_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
                     else:
-                        st.caption("No confident collaborative predictions for this user.")
+                        st.caption(
+                            "No content-based match found."
+                        )
+
                 else:
-                    st.caption("Enter a known user id to see collaborative results.")
+                    st.caption(
+                        "Enter a movie title to view content-based results."
+                    )
+
+            # -------------------------------------------------------------
+            # Collaborative-only
+            # -------------------------------------------------------------
+            with right:
+
+                st.subheader("Collaborative Recommendations")
+
+                if is_known_user:
+
+                    collaborative_results = recommend_user_based(
+                        user_id,
+                        user_rating_matrix,
+                        movie_columns,
+                        user_index,
+                        movieid_to_tmdbid,
+                        nbrs,
+                        user_means=user_means,
+                        top_n=top_n,
+                    )
+
+                    if collaborative_results:
+
+                        collab_df = pd.DataFrame(
+                            [
+                                (
+                                    id_to_title.get(mid, f"id {mid}"),
+                                    round(score, 1),
+                                )
+                                for mid, score in collaborative_results
+                            ],
+                            columns=["Movie Title", "Predicted Rating"],
+                        )
+
+                        st.dataframe(
+                            collab_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    else:
+                        st.caption(
+                            "No collaborative predictions available."
+                        )
+
+                else:
+                    st.caption(
+                        "Enter a known user ID to view collaborative results."
+                    )
+
+# -----------------------------------------------------------------------------
+# Initial state
+# -----------------------------------------------------------------------------
 else:
-    st.info("Enter a movie title and/or a user id in the sidebar, then click **Get Recommendations**.")
+
+    st.info(
+        "Enter a movie title and/or a user ID in the sidebar and click "
+        "**Get Recommendations**."
+    )
+
+    st.markdown(
+        """
+### How this recommender works
+
+- **Content-Based Filtering**
+  - Uses TF-IDF features from genres, keywords, cast, crew, and overview.
+  - Finds movies that are textually similar.
+
+- **Collaborative Filtering**
+  - Uses user rating patterns from the MovieLens dataset.
+  - Predicts movies a user may enjoy based on similar users.
+
+- **Hybrid Engine**
+  - Blends both methods using a graduated confidence parameter **α**.
+  - Handles cold-start users and unseen movies gracefully.
+"""
+    )

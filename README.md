@@ -66,14 +66,9 @@ Additionally, if a movie lacks collaborative data, the system automatically fall
 ├── hybrid_final.py         # Hybrid recommendation engine
 ├── requirements.txt
 │
-├── movies_metadata.csv
-├── credits_small.csv
-├── keywords.csv
-├── ratings_small.csv
-├── links_small.csv
-├── links.csv
-│
-├── .gitignore
+├── hybrid_recommender.pkl
+├── save_pickle.py
+|
 ├── .gitattributes
 └── README.md
 ```
@@ -91,6 +86,7 @@ Dataset files used:
 - ratings_small.csv
 - links_small.csv
 
+https://www.kaggle.com/datasets/rounakbanik/the-movies-dataset
 ---
 
 ## 🛠 Technologies Used
@@ -109,7 +105,7 @@ Dataset files used:
 ## 🚀 How to Use
 
 1. Enter a movie title.
-2. (Optional) Enter a User ID.
+2.  Enter a User ID.
 3. Choose the number of recommendations.
 4. Click **Get Recommendations**.
 5. View the generated recommendations along with optional content-based and collaborative recommendation breakdowns.
@@ -130,7 +126,6 @@ Dataset files used:
 ## 📷 Application Preview
 
 Access the deployed application here:
-
 https://recommendation-system-week-8-final-wohzhvduufbz595qrl9woh.streamlit.app/
 
 ---

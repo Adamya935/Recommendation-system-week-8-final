@@ -25,7 +25,7 @@ st.title("🎬 Hybrid Movie Recommendation System")
 st.write("Content-Based + Collaborative + Hybrid Recommendations")
 
 movie_title = st.text_input("Enter Movie Title", "")
-user_id_input = st.text_input("Enter User ID (optional)", "")
+user_id_input = st.text_input("Enter User ID ", "")
 top_n = st.slider("Number of Recommendations", 5, 20, 10)
 
 # ----------------------------------------------------
